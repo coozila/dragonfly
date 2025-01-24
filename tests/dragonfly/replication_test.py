@@ -28,6 +28,7 @@ DISCONNECT_NORMAL_STABLE_SYNC = 2
 M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
 async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
@@ -260,7 +261,7 @@ async def test_disconnect_replica(
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         if crash_type == 0:
             await asyncio.sleep(random.random() / 100 + 0.01)
-            await c_replica.close()
+            await c_replica.aclose()
             replica.stop(kill=True)
         else:
             await wait_available_async(c_replica)
@@ -281,7 +282,7 @@ async def test_disconnect_replica(
 
     async def stable_sync(replica, c_replica, crash_type):
         await asyncio.sleep(random.random() / 100)
-        await c_replica.close()
+        await c_replica.aclose()
         replica.stop(kill=True)
 
     await asyncio.gather(*(stable_sync(*args) for args in replicas_of_type(lambda t: t == 1)))
@@ -309,7 +310,7 @@ async def test_disconnect_replica(
     logging.debug("Check phase 3 replica survived")
     for replica, c_replica, _ in replicas_of_type(lambda t: t == 2):
         assert await c_replica.ping()
-        await c_replica.close()
+        await c_replica.aclose()
 
     logging.debug("Stop streaming")
     seeder.stop()
@@ -1490,6 +1491,7 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+@pytest.mark.exclude_epoll
 async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
     master = df_factory.create(proactor_threads=1, bind="::1", port=1111)
@@ -1971,23 +1973,27 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 8000000")
+    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 1000 RAND type set elements 2000")
 
     replica.stop()
     replica.start()
     c_replica = replica.client()
+
+    @assert_eventually
+    async def check_replica_isloading():
+        persistence = await c_replica.info("PERSISTENCE")
+        assert persistence["loading"] == 1
+
+    # If this fails adjust load of DEBUG POPULATE above.
+    await check_replica_isloading()
+
     # Check replica of not alowed while loading snapshot
-    try:
-        # If this fails adjust `keys` and the `assert dbsize >= 30000` above.
-        # Keep in mind that if the assert False is triggered below, it doesn't mean
-        # that there is a bug because it could be the case that while executing
-        # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
-        # is no longer in loading state and the assertion false is triggered.
-        assert "loading:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
+    # Keep in mind that if the exception has not been raised, it doesn't mean
+    # that there is a bug because it could be the case that while executing
+    # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
+    # is no longer in loading state and the assertion false is triggered.
+    with pytest.raises(aioredis.BusyLoadingError):
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        assert False
-    except aioredis.BusyLoadingError as e:
-        assert "Dragonfly is loading the dataset in memory" in str(e)
 
     # Check one we finish loading snapshot replicaof success
     await wait_available_async(c_replica, timeout=180)
@@ -2450,7 +2456,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
 
     await check_if_empty()
     assert await old_c_master.execute_command(f"EXISTS foo") == 1
-    await old_c_master.close()
+    await old_c_master.aclose()
 
     async def assert_body(client, result=1, state="online", node_role="slave"):
         async with async_timeout.timeout(10):
@@ -2474,7 +2480,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
             await assert_body(client_b, result=0)
 
         index = index + 1
-        await client_b.close()
+        await client_b.aclose()
 
 
 # This Test was intorduced in response to a bug when replicating empty hash maps with
@@ -2660,6 +2666,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],

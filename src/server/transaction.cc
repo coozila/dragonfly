@@ -184,8 +184,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id,
-                         std::optional<cluster::SlotId> slot_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -326,6 +325,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   // Stub transactions always operate only on single shard.
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
 
+  unique_slot_checker_.Reset();
   if ((key_index.NumArgs() == 1 && !IsAtomicMulti()) || is_stub) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 
@@ -1017,7 +1017,7 @@ ShardId Transaction::GetUniqueShard() const {
   return unique_shard_id_;
 }
 
-optional<cluster::SlotId> Transaction::GetUniqueSlotId() const {
+optional<SlotId> Transaction::GetUniqueSlotId() const {
   return unique_slot_checker_.GetUniqueSlotId();
 }
 
